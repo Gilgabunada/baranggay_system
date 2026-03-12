@@ -135,10 +135,28 @@
   .cert-preview .cert-body{font-family:'DM Sans',sans-serif;font-size:.91rem;line-height:1.85;margin-bottom:20px;}
   .cert-preview .cert-sig{display:flex;justify-content:space-between;margin-top:36px;}
   @media(max-width:768px){.sidebar{transform:translateX(-100%);}.main{margin-left:0;}.grid-2,.grid-3{grid-template-columns:1fr;}}
-  @media print{.sidebar,.modal-footer,.btn,#modal{display:none!important;}.main{margin-left:0;}}
+  #print-area{display:none;}
+  @media print{body>*{display:none!important;}#print-area{display:block!important;position:fixed;inset:0;background:#fff;padding:48px;z-index:99999;color:#000;}}
+  /* ── New UX additions ── */
+  .offline-banner{position:fixed;bottom:0;left:0;right:0;background:#e05c5c;color:#fff;text-align:center;padding:9px;font-size:.83rem;font-weight:600;z-index:2000;display:none;}
+  .session-warn{position:fixed;top:0;left:0;right:0;background:#d4a84b;color:#1a1a1a;text-align:center;padding:9px;font-size:.83rem;font-weight:600;z-index:2000;display:none;}
+  .toast{position:fixed;bottom:24px;right:24px;background:var(--surface);border:1px solid var(--border);border-radius:9px;padding:11px 16px;font-size:.84rem;box-shadow:var(--shadow);z-index:3000;display:flex;align-items:center;gap:9px;transform:translateY(80px);opacity:0;transition:all .3s;}
+  .toast.show{transform:translateY(0);opacity:1;}
+  .toast.success{border-color:var(--accent);color:var(--accent);}
+  .toast.error{border-color:var(--red);color:var(--red);}
+  .table-pagination{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-top:1px solid var(--border);font-size:.8rem;color:var(--text2);}
+  .pg-btn{padding:4px 9px;border:1px solid var(--border);border-radius:5px;background:transparent;color:var(--text2);cursor:pointer;font-size:.76rem;}
+  .pg-btn:hover{background:var(--surface2);color:var(--text);}
+  .pg-btn.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+  .export-btn{background:transparent;border:1px solid var(--border);border-radius:7px;padding:7px 13px;color:var(--text2);cursor:pointer;font-size:.78rem;font-family:'DM Sans',sans-serif;transition:all .2s;}
+  .export-btn:hover{border-color:var(--accent);color:var(--accent);}
 </style>
 </head>
 <body>
+<div id="print-area"></div>
+<div id="offline-banner" class="offline-banner">⚠️ You are offline. Changes may not be saved until you reconnect.</div>
+<div id="session-warn" class="session-warn">⏱ Session expires in <span id="session-countdown">5:00</span> due to inactivity. <button onclick="resetSessionTimer()" style="margin-left:10px;padding:3px 10px;border:1px solid #1a1a1a;border-radius:4px;cursor:pointer;font-weight:700;background:transparent">Keep me signed in</button></div>
+<div id="toast" class="toast"></div>
 
 <!-- PUBLIC PORTAL -->
 <div id="public-page">
@@ -494,6 +512,7 @@
         Sign In
       </button>
       <div style="margin-top:14px;text-align:center;font-size:.77rem;color:var(--text3)">This portal is for authorized Barangay Officials only.</div>
+      <div style="margin-top:8px;text-align:center"><button onclick="openPasswordReset()" style="background:none;border:none;color:var(--accent);font-size:.77rem;cursor:pointer;text-decoration:underline">Forgot password?</button></div>
     </div>
   </div></div>
 </div>
@@ -580,9 +599,86 @@ const dbList   = async path => {
 // ════════════════════════════════════════════════
 let currentUser = null;
 let _cache = {};
+const ROWS_PER_PAGE = 20;
 
 function eid(id){ return document.getElementById(id); }
 function v(id){ var el=eid(id); return el ? el.value.trim() : ''; }
+
+// ── TOAST ──
+let _toastTimer;
+function showToast(msg, type='success') {
+  const t = eid('toast'); if (!t) return;
+  t.textContent = (type==='success'?'✓ ':'✗ ') + msg;
+  t.className = `toast ${type} show`;
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(()=>{ t.className='toast'; }, 3500);
+}
+
+// ── OFFLINE DETECTION ──
+window.addEventListener('online',  ()=>{ const b=eid('offline-banner'); if(b) b.style.display='none'; });
+window.addEventListener('offline', ()=>{ const b=eid('offline-banner'); if(b) b.style.display='block'; });
+
+// ── SESSION TIMEOUT (30 min inactivity) ──
+const SESSION_MS = 30 * 60 * 1000;
+const WARN_MS    =  5 * 60 * 1000;
+let _sessionTimer, _warnTimer, _countdownInterval;
+
+function resetSessionTimer() {
+  clearTimeout(_sessionTimer); clearTimeout(_warnTimer); clearInterval(_countdownInterval);
+  const sw = eid('session-warn'); if (sw) sw.style.display = 'none';
+  if (!currentUser) return;
+  _warnTimer = setTimeout(()=>{
+    const sw2 = eid('session-warn'); if (sw2) sw2.style.display = 'block';
+    let secs = Math.floor(WARN_MS / 1000);
+    _countdownInterval = setInterval(()=>{
+      secs--;
+      const el = eid('session-countdown');
+      if (el) el.textContent = `${Math.floor(secs/60)}:${String(secs%60).padStart(2,'0')}`;
+      if (secs <= 0) clearInterval(_countdownInterval);
+    }, 1000);
+  }, SESSION_MS - WARN_MS);
+  _sessionTimer = setTimeout(()=>{
+    showToast('Session expired. Please sign in again.', 'error');
+    doLogout();
+  }, SESSION_MS);
+}
+['click','keydown','mousemove','touchstart'].forEach(e =>
+  document.addEventListener(e, ()=>{ if(currentUser) resetSessionTimer(); }, { passive:true })
+);
+
+// ── AUDIT LOG ──
+async function auditWrite(action, details='') {
+  if (!currentUser) return;
+  try {
+    await dbPush('auditLog', {
+      user: currentUser.name || currentUser.email,
+      role: currentUser.role,
+      action, details, ts: Date.now()
+    });
+  } catch(e) { /* non-blocking */ }
+}
+
+// ── CSV EXPORT ──
+function exportCSV(filename, headers, rows) {
+  const esc = val => `"${String(val||'').replace(/"/g,'""')}"`;
+  const csv = [headers.map(esc).join(','), ...rows.map(r=>r.map(esc).join(','))].join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv'}));
+  a.download = filename; a.click();
+}
+
+// ── PAGINATION ──
+function paginate(items, page, perPage=ROWS_PER_PAGE) {
+  const pages = Math.max(1, Math.ceil(items.length / perPage));
+  const p = Math.min(Math.max(1, page), pages);
+  return { items: items.slice((p-1)*perPage, p*perPage), page:p, pages, total:items.length };
+}
+function paginationHtml(page, pages, fn) {
+  if (pages <= 1) return '';
+  const btns = Array.from({length:pages},(_,i)=>
+    `<button class="pg-btn${i+1===page?' active':''}" onclick="${fn}(${i+1})">${i+1}</button>`).join('');
+  return `<div class="table-pagination"><span>Page ${page} of ${pages}</span><div style="display:flex;gap:5px">${btns}</div></div>`;
+}
 
 function calcAge(bd) {
   if (!bd) return '—';
@@ -604,7 +700,10 @@ function loading() { eid('main-content').innerHTML='<div class="empty-state"><sp
 // ════════════════════════════════════════════════
 // PAGE VISIBILITY
 // ════════════════════════════════════════════════
-function showSplash() { eid('login-modal').style.display='block'; }
+function showSplash() {
+  const m = eid('login-modal');
+  if (m) m.style.cssText='display:block;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.85);z-index:99999;';
+}
 function hideLogin()  { eid('login-modal').style.display='none'; }
 function showPublic() { eid('public-page').style.display='block'; eid('login-modal').style.display='none'; eid('app').style.display='none'; }
 function showApp()    { eid('public-page').style.display='none'; eid('login-modal').style.display='none'; eid('app').style.display='block'; }
@@ -630,7 +729,10 @@ async function doLogin() {
     if (!profile) throw new Error('No official profile found. Ask your administrator to set up your account in the database.');
 
     currentUser = { uid: cred.user.uid, email, ...profile };
+    await auditWrite('Login', `Signed in`);
+    hideLogin();
     initApp();
+    resetSessionTimer();
   } catch(e) {
     setErr('login-error', e.message);
   }
@@ -638,10 +740,31 @@ async function doLogin() {
 }
 
 function doLogout() {
+  clearTimeout(_sessionTimer); clearTimeout(_warnTimer); clearInterval(_countdownInterval);
+  const sw = eid('session-warn'); if (sw) sw.style.display = 'none';
+  if (currentUser) auditWrite('Logout', '');
   currentUser = null; _cache = {};
   auth.signOut();
   eid('app').style.display = 'none';
   eid('public-page').style.display = 'block';
+}
+
+function openPasswordReset() {
+  openModal('Reset Password', `
+    <p style="font-size:.85rem;color:var(--text2);margin-bottom:14px">Enter your official email address and we'll send a password reset link.</p>
+    <div class="form-group"><label>Email Address</label><input type="email" id="reset-email" placeholder="official@brgy.gov.ph"></div>
+    <div id="reset-msg" class="alert" style="display:none"></div>`,
+  [{ label:'Cancel', cls:'btn-ghost', action:'closeModal()' },
+   { label:'Send Reset Link', cls:'btn-primary', action:'sendPasswordReset()' }]);
+}
+async function sendPasswordReset() {
+  const email = v('reset-email');
+  if (!email) { setErr('reset-msg','Enter your email address.'); return; }
+  try {
+    await auth.sendPasswordResetEmail(email);
+    const el = eid('reset-msg');
+    if (el) { el.textContent = '✓ Reset link sent! Check your email.'; el.className='alert alert-success'; el.style.display='flex'; }
+  } catch(e) { setErr('reset-msg', e.message); }
 }
 
 // Keep session alive on page reload
@@ -652,6 +775,7 @@ auth.onAuthStateChanged(async user => {
       if (profile) {
         currentUser = { uid: user.uid, email: user.email, ...profile };
         initApp();
+        resetSessionTimer();
       } else {
         auth.signOut();
         // No profile found — just stay on public portal, don't pop login modal
@@ -686,7 +810,11 @@ function initApp() {
 // NAVIGATION
 // ════════════════════════════════════════════════
 const NAV = {
-  captain:   [{ id:'dashboard', icon:'◈', label:'Dashboard' }],
+  captain:   [
+    { id:'dashboard', icon:'◈', label:'Dashboard' },
+    { section:'Logs' },
+    { id:'audit-log', icon:'📋', label:'Audit Log' }
+  ],
   secretary: [
     { id:'dashboard', icon:'◈', label:'Dashboard' },
     { section:'Residents' },
@@ -695,11 +823,15 @@ const NAV = {
     { section:'Documents' },
     { id:'certificates', icon:'⊡', label:'Brgy. Certificates' },
     { id:'clearances', icon:'◉', label:'Brgy. Clearances' },
+    { id:'indigency', icon:'◫', label:'Indigency Certificates' },
+    { id:'business', icon:'⊞', label:'Business Clearances' },
     { section:'Cases' },
     { id:'blotters', icon:'≡', label:'Blotter Records' },
     { id:'summons', icon:'✉', label:'Summons' },
     { section:'Requests' },
-    { id:'requests', icon:'↓', label:'Resident Requests', badge:true }
+    { id:'requests', icon:'↓', label:'Resident Requests', badge:true },
+    { section:'Logs' },
+    { id:'audit-log', icon:'📋', label:'Audit Log' }
   ],
   health: [
     { id:'dashboard', icon:'◈', label:'Dashboard' },
@@ -722,10 +854,11 @@ function buildNav() {
 }
 
 const PAGES = {
-  dashboard, residents, households, certificates, clearances,
+  dashboard, residents, households, certificates, clearances, indigency, business,
   blotters, summons, requests,
   'health-records': healthRecords, vaccines, maternal,
-  'health-edu': healthEdu, 'primary-care': primaryCare
+  'health-edu': healthEdu, 'primary-care': primaryCare,
+  'audit-log': auditLog
 };
 
 function navigateTo(page) {
@@ -740,10 +873,11 @@ function navigateTo(page) {
 // DASHBOARD
 // ════════════════════════════════════════════════
 async function dashboard() {
-  const [res, bl, su, ct, cl, rq, hr, vc, mt] = await Promise.all([
+  const [res, bl, su, ct, cl, rq, hr, vc, mt, ind, biz] = await Promise.all([
     dbList('residents'), dbList('blotters'), dbList('summons'),
     dbList('certificates'), dbList('clearances'), dbList('requests'),
-    dbList('healthRecords'), dbList('vaccines'), dbList('maternal')
+    dbList('healthRecords'), dbList('vaccines'), dbList('maternal'),
+    dbList('indigency'), dbList('business')
   ]);
 
   const pending    = rq.filter(r => r.status === 'Pending').length;
@@ -752,8 +886,12 @@ async function dashboard() {
   const males      = res.filter(r => r.gender === 'Male').length;
   const females    = res.filter(r => r.gender === 'Female').length;
   const hh         = [...new Set(res.map(r => r.householdId).filter(Boolean))].length;
-  const recentDocs = [...ct.map(d=>({...d,_t:'Certificate'})),...cl.map(d=>({...d,_t:'Clearance'}))]
-                      .sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)).slice(0,6);
+  const recentDocs = [
+    ...ct.map(d=>({...d,_t:'Certificate'})),
+    ...cl.map(d=>({...d,_t:'Clearance'})),
+    ...ind.map(d=>({...d,_t:'Indigency'})),
+    ...biz.map(d=>({...d,_t:'Business Clr.'}))
+  ].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)).slice(0,6);
 
   const badge = eid('badge-requests');
   if (badge) badge.style.display = pending > 0 ? 'inline-block' : 'none';
@@ -797,12 +935,13 @@ async function dashboard() {
 // ════════════════════════════════════════════════
 // RESIDENTS
 // ════════════════════════════════════════════════
-async function residents() {
+async function residents(page=1) {
   const list = await dbList('residents');
   list.sort((a,b) => (a.lastName||'').localeCompare(b.lastName||''));
   _cache.residents = list;
   const search = (_cache._resSearch||'').toLowerCase();
   const filtered = search ? list.filter(r => `${r.firstName} ${r.lastName} ${r.address}`.toLowerCase().includes(search)) : list;
+  const { items, page:pg, pages } = paginate(filtered, page);
 
   eid('main-content').innerHTML = `
     <div class="page-header-row">
@@ -812,10 +951,13 @@ async function residents() {
         </div>
         <div><div class="page-title">Residents Registry</div><div class="page-sub">${filtered.length} resident(s)</div></div>
       </div>
-      <button class="btn btn-primary" onclick="openAddResident()">
-        <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        Add Resident
-      </button>
+      <div style="display:flex;gap:8px">
+        <button class="export-btn" onclick="exportResidents()">⬇ Export CSV</button>
+        <button class="btn btn-primary" onclick="openAddResident()">
+          <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Resident
+        </button>
+      </div>
     </div>
     <div class="search-bar">
       <div class="search-input-wrap">
@@ -829,7 +971,7 @@ async function residents() {
     <div class="card" style="padding:0"><div class="table-wrap"><table>
       <thead><tr><th>Name</th><th>Age</th><th>Gender</th><th>Civil Status</th><th>Household</th><th>Address</th><th>Actions</th></tr></thead>
       <tbody>
-        ${filtered.length ? filtered.map(r=>`<tr>
+        ${items.length ? items.map(r=>`<tr>
           <td><strong>${r.lastName||''}, ${r.firstName||''}</strong></td>
           <td>${calcAge(r.birthdate)}</td>
           <td><span class="badge ${r.gender==='Male'?'badge-blue':'badge-purple'}">${r.gender||'—'}</span></td>
@@ -849,7 +991,18 @@ async function residents() {
           </td>
         </tr>`).join('') : `<tr><td colspan="7"><div class="empty-state"><div class="emoji">—</div>No residents found.</div></td></tr>`}
       </tbody>
-    </table></div></div>`;
+    </table></div>
+    ${paginationHtml(pg, pages, 'residents')}
+    </div>`;
+}
+
+function exportResidents() {
+  const list = _cache.residents || [];
+  exportCSV('residents.csv',
+    ['Last Name','First Name','Middle Name','Birthdate','Age','Gender','Civil Status','Religion','Household ID','Address','Contact'],
+    list.map(r=>[r.lastName,r.firstName,r.middleName,r.birthdate,calcAge(r.birthdate),r.gender,r.civilStatus,r.religion,r.householdId,r.address,r.contact])
+  );
+  auditWrite('Export CSV', `Residents list — ${list.length} record(s)`);
 }
 
 // ── BIRTHDAY DROPDOWN HELPERS ──
@@ -947,9 +1100,9 @@ async function saveResident(id=null) {
   const data = { firstName:fn, lastName:ln, middleName:v('r-mname'), birthdate:bd, gender:gn,
     civilStatus:v('r-civil'), religion:v('r-religion'), householdId:v('r-household'), address:addr, contact:v('r-contact') };
   try {
-    if (id) await dbUpdate(`residents/${id}`, data);
-    else await dbPush('residents', data);
-    closeModal(); residents();
+    if (id) { await dbUpdate(`residents/${id}`, data); await auditWrite('Edit Resident', `${fn} ${ln}`); }
+    else { await dbPush('residents', data); await auditWrite('Add Resident', `${fn} ${ln}`); }
+    closeModal(); showToast(id ? 'Resident updated.' : 'Resident added.'); residents();
   } catch(e) { setErr('r-err', e.message); }
 }
 async function viewResident(id) {
@@ -972,8 +1125,30 @@ async function viewResident(id) {
   `, [{ label:'Close', cls:'btn-ghost', action:'closeModal()' }]);
 }
 async function deleteResident(id) {
-  if (!confirm('Remove this resident? This cannot be undone.')) return;
-  await dbRemove(`residents/${id}`); residents();
+  if (!confirm('Remove this resident and ALL their related records (documents, health records)? This cannot be undone.')) return;
+  try {
+    const r = (_cache.residents||[]).find(x=>x.id===id) || await dbGet(`residents/${id}`) || {};
+    const name = `${r.firstName||''} ${r.lastName||''}`.trim() || id;
+    // Cascade delete all related records
+    const [certs, clears, ind, biz, hrs, vacs, mats] = await Promise.all([
+      dbList('certificates'), dbList('clearances'), dbList('indigency'), dbList('business'),
+      dbList('healthRecords'), dbList('vaccines'), dbList('maternal')
+    ]);
+    const ops = [
+      ...certs.filter(x=>x.residentId===id).map(x=>dbRemove(`certificates/${x.id}`)),
+      ...clears.filter(x=>x.residentId===id).map(x=>dbRemove(`clearances/${x.id}`)),
+      ...ind.filter(x=>x.residentId===id).map(x=>dbRemove(`indigency/${x.id}`)),
+      ...biz.filter(x=>x.residentId===id).map(x=>dbRemove(`business/${x.id}`)),
+      ...hrs.filter(x=>x.residentId===id).map(x=>dbRemove(`healthRecords/${x.id}`)),
+      ...vacs.filter(x=>x.residentId===id).map(x=>dbRemove(`vaccines/${x.id}`)),
+      ...mats.filter(x=>x.residentId===id).map(x=>dbRemove(`maternal/${x.id}`)),
+    ];
+    await Promise.all(ops);
+    await dbRemove(`residents/${id}`);
+    await auditWrite('Delete Resident', `Removed ${name} and ${ops.length} related record(s)`);
+    showToast(`Resident ${name} and related records removed.`);
+    residents();
+  } catch(e) { showToast('Error deleting resident: ' + e.message, 'error'); }
 }
 
 // ════════════════════════════════════════════════
@@ -1059,7 +1234,8 @@ async function saveDoc(node, label) {
   const r = allRes.find(x=>x.id===resId)||{};
   try {
     await dbPush(node, { residentId:resId, residentName:`${r.firstName} ${r.lastName}`, type:`Barangay ${label}`, purpose, orNumber:v('doc-or'), status:v('doc-status'), issuedBy:currentUser.name });
-    closeModal();
+    await auditWrite(`Issue ${label}`, `For ${r.firstName} ${r.lastName} — ${purpose}`);
+    closeModal(); showToast(`${label} issued.`);
     if (node==='certificates') certificates(); else clearances();
   } catch(e) { setErr('doc-err', e.message); }
 }
@@ -1067,34 +1243,238 @@ async function saveDoc(node, label) {
 async function deleteDoc(node, id, label) {
   if (!confirm(`Delete this ${label}?`)) return;
   await dbRemove(`${node}/${id}`);
-  if (node==='certificates') certificates(); else clearances();
+  if (node==='certificates') certificates();
+  else if (node==='clearances') clearances();
+  else if (node==='indigency') indigency();
+  else business();
 }
 
+// ── FIXED PRINT — uses #print-area so only cert prints ──
 async function printDoc(node, id) {
   const item = await dbGet(`${node}/${id}`);
   if (!item) return;
   const allRes = _cache.residents || await dbList('residents');
   const r = allRes.find(x=>x.id===item.residentId)||{};
   const today = new Date().toLocaleDateString('en-PH',{year:'numeric',month:'long',day:'numeric'});
-  openModal(`Print: ${item.type}`, `
-    <div class="cert-preview">
-      <div style="text-align:center;font-size:.82rem;font-family:'DM Sans',sans-serif;margin-bottom:3px">Republic of the Philippines</div>
-      <h2>${(item.type||'').toUpperCase()}</h2>
-      <div class="cert-sub">Office of the Barangay</div>
-      <div style="text-align:center;font-size:.83rem;font-family:'DM Sans',sans-serif;margin-bottom:16px;font-style:italic">This is to certify that:</div>
-      <div class="cert-body">
-        <strong>${item.residentName}</strong>${r.birthdate?', '+calcAge(r.birthdate)+' years of age':''}, ${r.gender||''}, ${r.civilStatus||''},
-        a resident of <strong>${r.address||'this barangay'}</strong>, is known to be a law-abiding citizen of good moral character.<br><br>
-        This certification is issued upon request for the purpose of <strong>${item.purpose}</strong> and for whatever legal purpose it may serve.<br><br>
-        Issued this ${today} at the Office of the Barangay.
+
+  let bodyText = '';
+  if (node === 'indigency') {
+    bodyText = `
+      &nbsp;&nbsp;&nbsp;&nbsp;<strong>${item.residentName}</strong>${r.birthdate?', <strong>'+calcAge(r.birthdate)+' years old</strong>':''}, <strong>${r.gender||'—'}</strong>, <strong>${r.civilStatus||'—'}</strong>,
+      a bonafide resident of <strong>${r.address||'this barangay'}</strong>, is known to belong to an <strong>indigent family</strong> in this barangay
+      and is not financially capable of meeting basic necessities.<br><br>
+      &nbsp;&nbsp;&nbsp;&nbsp;This certification is issued for the purpose of <strong>${item.purpose}</strong> and for whatever legal intent it may serve.`;
+  } else if (node === 'business') {
+    bodyText = `
+      &nbsp;&nbsp;&nbsp;&nbsp;This is to certify that the business establishment known as <strong>${item.businessName||'—'}</strong>,
+      classified as <strong>${item.businessType||'—'}</strong>, located at <strong>${item.businessAddress||r.address||'—'}</strong>,
+      owned/operated by <strong>${item.residentName}</strong>, has been duly registered and is <strong>authorized to operate</strong>
+      within the jurisdiction of this barangay.<br><br>
+      &nbsp;&nbsp;&nbsp;&nbsp;This clearance is issued upon request for the purpose of <strong>${item.purpose}</strong> and for whatever legal intent it may serve.`;
+  } else {
+    bodyText = `
+      &nbsp;&nbsp;&nbsp;&nbsp;<strong>${item.residentName}</strong>${r.birthdate?', <strong>'+calcAge(r.birthdate)+' years old</strong>':''}, <strong>${r.gender||'—'}</strong>, <strong>${r.civilStatus||'—'}</strong>,
+      a bonafide resident of <strong>${r.address||'this barangay'}</strong>, is personally known to be a person of good moral character
+      and a law-abiding citizen of this community.<br><br>
+      &nbsp;&nbsp;&nbsp;&nbsp;This certification is issued upon request for the purpose of <strong>${item.purpose}</strong> and for whatever legal intent it may serve.`;
+  }
+
+  const certHtml = `
+    <div style="font-family:'Times New Roman',serif;max-width:700px;margin:0 auto;color:#000;">
+      <div style="text-align:center;margin-bottom:4px;">
+        <div style="font-size:11pt;">Republic of the Philippines</div>
+        <div style="font-size:10pt;">OFFICE OF THE BARANGAY</div>
       </div>
-      <div class="cert-sig">
-        <div style="text-align:center"><div style="border-top:1px solid #555;width:150px;padding-top:4px;font-size:.8rem">Requesting Party</div></div>
-        <div style="text-align:center"><div style="border-top:1px solid #555;width:185px;padding-top:4px;font-size:.8rem">Barangay Captain</div></div>
+      <hr style="border:1.5px solid #000;margin:10px 0;">
+      <h2 style="text-align:center;font-size:16pt;letter-spacing:2px;margin:10px 0 2px;">${(item.type||'').toUpperCase()}</h2>
+      <div style="text-align:center;font-size:10pt;font-style:italic;margin-bottom:18px;">To Whom It May Concern:</div>
+      <div style="font-size:12pt;line-height:2;text-align:justify;margin-bottom:24px;">${bodyText}</div>
+      <div style="font-size:11pt;margin-bottom:32px;">
+        Issued this <strong>${today}</strong> at the Office of the Barangay, Philippines.
       </div>
-      <div style="margin-top:12px;text-align:right;font-size:.72rem;font-family:'DM Sans',sans-serif;color:#888">OR No.: ${item.orNumber||'—'} | Issued by: ${item.issuedBy||'—'}</div>
-    </div>`,
-  [{ label:'Close',cls:'btn-ghost',action:'closeModal()' },{ label:'Print',cls:'btn-primary',action:'window.print()' }]);
+      <div style="display:flex;justify-content:space-between;margin-top:48px;">
+        <div style="text-align:center;width:200px;">
+          <div style="border-top:1px solid #000;padding-top:6px;font-size:10pt;">Signature of Requesting Party</div>
+        </div>
+        <div style="text-align:center;width:220px;">
+          <div style="border-top:1px solid #000;padding-top:6px;font-size:10pt;font-weight:bold;">Barangay Captain</div>
+        </div>
+      </div>
+      <div style="margin-top:24px;font-size:9pt;color:#555;border-top:1px dashed #ccc;padding-top:8px;display:flex;justify-content:space-between;">
+        <span>OR No.: <strong>${item.orNumber||'—'}</strong></span>
+        <span>Issued by: <strong>${item.issuedBy||'—'}</strong></span>
+        <span>Date: <strong>${today}</strong></span>
+      </div>
+    </div>`;
+
+  // Populate hidden print area
+  const pa = eid('print-area');
+  if (pa) pa.innerHTML = certHtml;
+
+  openModal(`Preview: ${item.type}`,
+    `<div style="background:#f5f5f5;border:1px solid #ddd;border-radius:6px;padding:16px;max-height:400px;overflow-y:auto;">${certHtml}</div>`,
+    [{ label:'Close', cls:'btn-ghost', action:'closeModal()' },
+     { label:'🖨 Print', cls:'btn-primary', action:'window.print()' }]);
+}
+
+// ════════════════════════════════════════════════
+// INDIGENCY CERTIFICATE
+// ════════════════════════════════════════════════
+async function indigency() {
+  const items = (await dbList('indigency')).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+  eid('main-content').innerHTML = `
+    <div class="page-header-row">
+      <div><div class="page-title">Indigency Certificates</div><div class="page-sub">${items.length} record(s)</div></div>
+      <button class="btn btn-primary" onclick="openIssueIndigency()">Issue Indigency Cert</button>
+    </div>
+    <div class="card" style="padding:0"><div class="table-wrap"><table>
+      <thead><tr><th>OR #</th><th>Resident</th><th>Purpose</th><th>Date</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>
+        ${items.length ? items.map(c=>`<tr>
+          <td><strong>${c.orNumber||'—'}</strong></td>
+          <td>${c.residentName||'—'}</td>
+          <td>${c.purpose||'—'}</td>
+          <td>${fmtDate(c.createdAt)}</td>
+          <td><span class="badge ${c.status==='Released'?'badge-green':c.status==='Processing'?'badge-yellow':'badge-gray'}">${c.status||'—'}</span></td>
+          <td style="white-space:nowrap">
+            <button class="btn btn-ghost btn-sm" onclick="printDoc('indigency','${c.id}')">Print</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteDoc('indigency','${c.id}','Indigency Certificate')">Delete</button>
+          </td>
+        </tr>`).join('') : `<tr><td colspan="6"><div class="empty-state"><div class="emoji">—</div>No indigency certificates issued yet.</div></td></tr>`}
+      </tbody>
+    </table></div></div>`;
+}
+
+async function openIssueIndigency() {
+  const res = await dbList('residents');
+  res.sort((a,b)=>(a.lastName||'').localeCompare(b.lastName||''));
+  const opts = res.map(r=>`<option value="${r.id}">${r.lastName}, ${r.firstName}</option>`).join('');
+  openModal('Issue Indigency Certificate', `
+    <div class="form-group"><label>Resident *</label><select id="ind-res"><option value="">Select resident…</option>${opts}</select></div>
+    <div class="form-group"><label>Purpose *</label>
+      <select id="ind-purpose-sel" onchange="document.getElementById('ind-purpose').value=this.value;if(this.value==='Other')document.getElementById('ind-purpose').removeAttribute('readonly');else document.getElementById('ind-purpose').setAttribute('readonly','')">
+        <option value="">— Select purpose —</option>
+        <option value="Medical Assistance">Medical Assistance</option>
+        <option value="Financial Assistance">Financial Assistance</option>
+        <option value="Educational Assistance">Educational Assistance</option>
+        <option value="Government Social Program">Government Social Program</option>
+        <option value="Hospital/Clinic Admission">Hospital/Clinic Admission</option>
+        <option value="Legal Aid">Legal Aid</option>
+        <option value="Other">Other (specify below)</option>
+      </select>
+    </div>
+    <div class="form-group"><label>Purpose Details *</label><input type="text" id="ind-purpose" placeholder="Describe purpose…"></div>
+    <div class="form-group"><label>OR Number</label><input type="text" id="ind-or" placeholder="OR-00000"></div>
+    <div class="form-group"><label>Status</label>
+      <select id="ind-status"><option value="Processing">Processing</option><option value="Released">Released</option></select>
+    </div>
+    <div id="ind-err" class="alert alert-error" style="display:none"></div>`,
+  [{ label:'Cancel', cls:'btn-ghost', action:'closeModal()' },
+   { label:'Issue Certificate', cls:'btn-primary', action:'saveIndigency()' }]);
+}
+
+async function saveIndigency() {
+  const resId=v('ind-res'), purpose=v('ind-purpose');
+  if (!resId||!purpose) { setErr('ind-err','Please fill all required fields.'); return; }
+  const allRes = _cache.residents || await dbList('residents');
+  const r = allRes.find(x=>x.id===resId)||{};
+  try {
+    await dbPush('indigency', {
+      residentId:resId,
+      residentName:`${r.firstName} ${r.lastName}`,
+      type:'Indigency Certificate',
+      purpose, orNumber:v('ind-or'),
+      status:v('ind-status'),
+      issuedBy:currentUser.name
+    });
+    await auditWrite('Issue Indigency Certificate', `For ${r.firstName} ${r.lastName} — ${purpose}`);
+    closeModal(); showToast('Indigency Certificate issued.'); indigency();
+  } catch(e) { setErr('ind-err', e.message); }
+}
+
+// ════════════════════════════════════════════════
+// BUSINESS CLEARANCE
+// ════════════════════════════════════════════════
+async function business() {
+  const items = (await dbList('business')).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+  eid('main-content').innerHTML = `
+    <div class="page-header-row">
+      <div><div class="page-title">Business Clearances</div><div class="page-sub">${items.length} record(s)</div></div>
+      <button class="btn btn-primary" onclick="openIssueBusiness()">Issue Business Clearance</button>
+    </div>
+    <div class="card" style="padding:0"><div class="table-wrap"><table>
+      <thead><tr><th>OR #</th><th>Business Name</th><th>Owner</th><th>Type</th><th>Date</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>
+        ${items.length ? items.map(c=>`<tr>
+          <td><strong>${c.orNumber||'—'}</strong></td>
+          <td><strong>${c.businessName||'—'}</strong></td>
+          <td>${c.residentName||'—'}</td>
+          <td><span class="badge badge-blue">${c.businessType||'—'}</span></td>
+          <td>${fmtDate(c.createdAt)}</td>
+          <td><span class="badge ${c.status==='Released'?'badge-green':c.status==='Processing'?'badge-yellow':'badge-gray'}">${c.status||'—'}</span></td>
+          <td style="white-space:nowrap">
+            <button class="btn btn-ghost btn-sm" onclick="printDoc('business','${c.id}')">Print</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteDoc('business','${c.id}','Business Clearance')">Delete</button>
+          </td>
+        </tr>`).join('') : `<tr><td colspan="7"><div class="empty-state"><div class="emoji">—</div>No business clearances issued yet.</div></td></tr>`}
+      </tbody>
+    </table></div></div>`;
+}
+
+async function openIssueBusiness() {
+  const res = await dbList('residents');
+  res.sort((a,b)=>(a.lastName||'').localeCompare(b.lastName||''));
+  const opts = res.map(r=>`<option value="${r.id}">${r.lastName}, ${r.firstName}</option>`).join('');
+  openModal('Issue Business Clearance', `
+    <div class="form-group"><label>Business Owner (Resident) *</label><select id="biz-res"><option value="">Select resident…</option>${opts}</select></div>
+    <div class="form-group"><label>Business Name *</label><input type="text" id="biz-name" placeholder="e.g. Juan's Sari-sari Store"></div>
+    <div class="form-group"><label>Business Type *</label>
+      <select id="biz-type">
+        <option value="">— Select type —</option>
+        <option value="Sari-sari Store">Sari-sari Store</option>
+        <option value="Food & Beverage">Food & Beverage</option>
+        <option value="Retail">Retail</option>
+        <option value="Repair Shop">Repair Shop</option>
+        <option value="Salon / Barbershop">Salon / Barbershop</option>
+        <option value="Livestock / Poultry">Livestock / Poultry</option>
+        <option value="Trucking / Transport">Trucking / Transport</option>
+        <option value="Professional Services">Professional Services</option>
+        <option value="Online Selling">Online Selling</option>
+        <option value="Other">Other</option>
+      </select>
+    </div>
+    <div class="form-group"><label>Business Address *</label><input type="text" id="biz-addr" placeholder="Location of the business"></div>
+    <div class="form-group"><label>Purpose *</label><input type="text" id="biz-purpose" placeholder="e.g. New Business Permit, Renewal…"></div>
+    <div class="form-group"><label>OR Number</label><input type="text" id="biz-or" placeholder="OR-00000"></div>
+    <div class="form-group"><label>Status</label>
+      <select id="biz-status"><option value="Processing">Processing</option><option value="Released">Released</option></select>
+    </div>
+    <div id="biz-err" class="alert alert-error" style="display:none"></div>`,
+  [{ label:'Cancel', cls:'btn-ghost', action:'closeModal()' },
+   { label:'Issue Clearance', cls:'btn-primary', action:'saveBusiness()' }]);
+}
+
+async function saveBusiness() {
+  const resId=v('biz-res'), bizName=v('biz-name'), bizType=v('biz-type'),
+        bizAddr=v('biz-addr'), purpose=v('biz-purpose');
+  if (!resId||!bizName||!bizType||!bizAddr||!purpose) { setErr('biz-err','Please fill all required fields.'); return; }
+  const allRes = _cache.residents || await dbList('residents');
+  const r = allRes.find(x=>x.id===resId)||{};
+  try {
+    await dbPush('business', {
+      residentId:resId,
+      residentName:`${r.firstName} ${r.lastName}`,
+      type:'Business Clearance',
+      businessName:bizName,
+      businessType:bizType,
+      businessAddress:bizAddr,
+      purpose, orNumber:v('biz-or'),
+      status:v('biz-status'),
+      issuedBy:currentUser.name
+    });
+    await auditWrite('Issue Business Clearance', `${bizName} (${bizType}) — owner: ${r.firstName} ${r.lastName}`);
+    closeModal(); showToast('Business Clearance issued.'); business();
+  } catch(e) { setErr('biz-err', e.message); }
 }
 
 // ════════════════════════════════════════════════
@@ -1148,7 +1528,8 @@ async function saveBlotter() {
   if (!comp||!resp||!inc||!date||!det) { setErr('bl-err','Fill all required fields.'); return; }
   try {
     await dbPush('blotters', { complainant:comp, respondent:resp, incident:inc, incidentDate:date, location:v('bl-loc'), details:det, status:v('bl-stat'), recordedBy:currentUser.name });
-    closeModal(); blotters();
+    await auditWrite('Record Blotter', `${inc} — ${comp} vs ${resp}`);
+    closeModal(); showToast('Blotter recorded.'); blotters();
   } catch(e) { setErr('bl-err', e.message); }
 }
 
@@ -1233,7 +1614,8 @@ async function saveSummons() {
   if (!to||!reason||!date) { setErr('su-err','Fill required fields.'); return; }
   try {
     await dbPush('summons', { to, reason, appearanceDate:date, appearanceTime:v('su-time'), notes:v('su-notes'), status:'Pending', issuedBy:currentUser.name });
-    closeModal(); summons();
+    await auditWrite('Issue Summons', `To: ${to} — ${reason}`);
+    closeModal(); showToast('Summons issued.'); summons();
   } catch(e) { setErr('su-err', e.message); }
 }
 
@@ -1333,61 +1715,90 @@ async function viewRequest(id) {
     ${r.purpose&&!isReg?`<div style="margin-top:11px"><div style="font-size:.75rem;color:var(--text2);margin-bottom:5px;text-transform:uppercase">Purpose:</div>
     <div style="background:var(--surface2);padding:10px;border-radius:7px;font-size:.83rem">${r.purpose}</div></div>`:''}
     ${extraHtml}`,
-  [{ label:'Close', cls:'btn-ghost', action:'closeModal()' }, eval('('+acceptBtn+')')]);
+  [{ label:'Close', cls:'btn-ghost', action:'closeModal()' },
+   ...(isReg && r.status==='Pending' ? [{ label:'Accept & Register', cls:'btn-primary', action:`acceptRegistration('${id}')` }] :
+       isDep && r.status==='Pending' ? [{ label:'Accept & Remove',   cls:'btn-danger',  action:`acceptDeparture('${id}')` }] :
+       r.status==='Pending'          ? [{ label:'Process',           cls:'btn-primary',  action:`closeModal();processRequest('${id}','${r.status}')` }] : [])
+  ]);
 }
 
-// One-click: Accept registration → add to residents
+// One-click: Accept registration → add to residents (with duplicate check)
 async function acceptRegistration(id) {
   const r = await dbGet(`requests/${id}`);
   if (!r) return;
-  if (!confirm(`Add ${r.name} to the Residents Registry?`)) return;
   try {
+    const allRes = await dbList('residents');
+    const firstName = r.firstName || (r.name||'').split(' ')[0] || '';
+    const lastName  = r.lastName  || (r.name||'').split(' ').slice(1).join(' ') || '';
+    const duplicate = allRes.find(x =>
+      x.birthdate === r.birthday &&
+      x.firstName.toLowerCase() === firstName.toLowerCase() &&
+      x.lastName.toLowerCase()  === lastName.toLowerCase()
+    );
+    if (duplicate && !confirm(`A resident named ${r.name} with the same birthdate already exists. Register anyway?`)) return;
+    if (!duplicate && !confirm(`Add ${r.name} to the Residents Registry?`)) return;
     await dbPush('residents', {
-      firstName: r.firstName||r.name.split(' ')[0],
-      lastName:  r.lastName||r.name.split(' ').slice(1).join(' '),
-      middleName: r.middleName||'',
-      birthdate:  r.birthday||'',
-      gender:     r.gender||'',
-      civilStatus:r.civilStatus||'',
-      religion:   r.religion||'',
-      householdId:r.householdId||'',
-      address:    r.address||'',
-      contact:    r.contact||''
+      firstName, lastName,
+      middleName:  r.middleName||'',
+      birthdate:   r.birthday||'',
+      gender:      r.gender||'',
+      civilStatus: r.civilStatus||'',
+      religion:    r.religion||'',
+      householdId: r.householdId||'',
+      address:     r.address||'',
+      contact:     r.contact||''
     });
     await dbUpdate(`requests/${id}`, { status:'Done', remarks:'Accepted — added to residents registry.', processedBy:currentUser.name, processedAt:Date.now() });
+    await auditWrite('Accept Registration', `Registered ${r.name}`);
     closeModal();
-    alert(`${r.name} has been added to the Residents Registry!`);
+    showToast(`${r.name} added to the Residents Registry.`);
     requests();
-  } catch(e) { alert('Error: '+e.message); }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
 }
 
-// One-click: Accept departure → remove from residents (find by name + birthdate)
+// One-click: Accept departure → cascade-delete resident + all related records
 async function acceptDeparture(id) {
   const r = await dbGet(`requests/${id}`);
   if (!r) return;
   const label = r.subType==='removal' ? 'remove the data of' : 'mark as departed and remove';
-  if (!confirm(`Are you sure you want to ${label} ${r.name}? This will delete their resident record.`)) return;
+  if (!confirm(`Are you sure you want to ${label} ${r.name}? This will delete their resident record and ALL related data.`)) return;
   try {
-    // Find matching resident by name and birthdate
     const allRes = await dbList('residents');
-    const match  = allRes.find(x =>
+    const firstName = r.firstName || (r.name||'').split(' ')[0] || '';
+    const lastName  = r.lastName  || (r.name||'').split(' ').slice(1).join(' ') || '';
+    const match = allRes.find(x =>
       x.birthdate === r.birthday &&
-      (`${x.firstName} ${x.lastName}`.toLowerCase() === r.name.toLowerCase() ||
-       (x.firstName.toLowerCase() === (r.firstName||'').toLowerCase() && x.lastName.toLowerCase() === (r.lastName||'').toLowerCase()))
+      x.firstName.toLowerCase() === firstName.toLowerCase() &&
+      x.lastName.toLowerCase()  === lastName.toLowerCase()
     );
     if (match) {
+      const [certs, clears, ind, biz, hrs, vacs, mats] = await Promise.all([
+        dbList('certificates'), dbList('clearances'), dbList('indigency'), dbList('business'),
+        dbList('healthRecords'), dbList('vaccines'), dbList('maternal')
+      ]);
+      const ops = [
+        ...certs.filter(x=>x.residentId===match.id).map(x=>dbRemove(`certificates/${x.id}`)),
+        ...clears.filter(x=>x.residentId===match.id).map(x=>dbRemove(`clearances/${x.id}`)),
+        ...ind.filter(x=>x.residentId===match.id).map(x=>dbRemove(`indigency/${x.id}`)),
+        ...biz.filter(x=>x.residentId===match.id).map(x=>dbRemove(`business/${x.id}`)),
+        ...hrs.filter(x=>x.residentId===match.id).map(x=>dbRemove(`healthRecords/${x.id}`)),
+        ...vacs.filter(x=>x.residentId===match.id).map(x=>dbRemove(`vaccines/${x.id}`)),
+        ...mats.filter(x=>x.residentId===match.id).map(x=>dbRemove(`maternal/${x.id}`)),
+      ];
+      await Promise.all(ops);
       await dbRemove(`residents/${match.id}`);
-      await dbUpdate(`requests/${id}`, { status:'Done', remarks:`Accepted — resident record removed. Reason: ${r.leaveReason||'—'}`, processedBy:currentUser.name, processedAt:Date.now() });
+      await dbUpdate(`requests/${id}`, { status:'Done', remarks:`Accepted — resident and ${ops.length} related record(s) removed. Reason: ${r.leaveReason||'—'}`, processedBy:currentUser.name, processedAt:Date.now() });
+      await auditWrite('Accept Departure', `Removed ${r.name} and ${ops.length} related record(s)`);
       closeModal();
-      alert(`${r.name}'s resident record has been removed.`);
+      showToast(`${r.name}'s record and all related data removed.`);
     } else {
-      // No exact match — mark done but warn
-      await dbUpdate(`requests/${id}`, { status:'Done', remarks:`Accepted — no exact resident record found to delete. Manual check may be needed.`, processedBy:currentUser.name, processedAt:Date.now() });
+      await dbUpdate(`requests/${id}`, { status:'Done', remarks:'Accepted — no exact resident record found. Manual check may be needed.', processedBy:currentUser.name, processedAt:Date.now() });
+      await auditWrite('Accept Departure', `No matching resident found for ${r.name}`);
       closeModal();
-      alert(`Request accepted, but no exact resident record was found for ${r.name}. Please check the registry manually.`);
+      showToast(`No exact match found for ${r.name} — check registry manually.`, 'error');
     }
     requests();
-  } catch(e) { alert('Error: '+e.message); }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 function processRequest(id, cur) {
@@ -1872,10 +2283,54 @@ function closeModal() { eid('modal').style.display='none'; }
 // ════════════════════════════════════════════════
 // BOOT
 // ════════════════════════════════════════════════
+// ════════════════════════════════════════════════
+// AUDIT LOG PAGE
+// ════════════════════════════════════════════════
+async function auditLog(page=1) {
+  const all = (await dbList('auditLog')).sort((a,b)=>(b.ts||b.createdAt||0)-(a.ts||a.createdAt||0));
+  const search = (_cache._auditSearch||'').toLowerCase();
+  const filtered = search ? all.filter(e=>`${e.user} ${e.action} ${e.details}`.toLowerCase().includes(search)) : all;
+  const { items, page:pg, pages } = paginate(filtered, page, 30);
+
+  eid('main-content').innerHTML = `
+    <div class="page-header-row">
+      <div><div class="page-title">📋 Audit Log</div><div class="page-sub">${filtered.length} event(s)</div></div>
+      <button class="export-btn" onclick="exportAuditLog()">⬇ Export CSV</button>
+    </div>
+    <div class="search-bar">
+      <div class="search-input-wrap">
+        <span class="search-icon"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
+        <input type="text" placeholder="Search by user, action, or details…" value="${_cache._auditSearch||''}" oninput="_cache._auditSearch=this.value;auditLog()">
+      </div>
+      ${_cache._auditSearch ? `<button class="btn btn-ghost btn-sm" onclick="_cache._auditSearch='';auditLog()">✕ Clear</button>` : ''}
+    </div>
+    <div class="card" style="padding:0"><div class="table-wrap"><table>
+      <thead><tr><th>Date & Time</th><th>User</th><th>Role</th><th>Action</th><th>Details</th></tr></thead>
+      <tbody>
+        ${items.length ? items.map(e=>`<tr>
+          <td style="white-space:nowrap;font-size:.78rem;color:var(--text2)">${e.ts||e.createdAt ? new Date(e.ts||e.createdAt).toLocaleString('en-PH') : '—'}</td>
+          <td><strong>${e.user||'—'}</strong></td>
+          <td><span class="badge badge-blue">${e.role||'—'}</span></td>
+          <td>${e.action||'—'}</td>
+          <td style="font-size:.82rem;color:var(--text2)">${e.details||'—'}</td>
+        </tr>`).join('') : `<tr><td colspan="5"><div class="empty-state"><div class="emoji">📋</div>No audit events yet.</div></td></tr>`}
+      </tbody>
+    </table></div>
+    ${paginationHtml(pg, pages, 'auditLog')}
+    </div>`;
+}
+
+async function exportAuditLog() {
+  const all = (await dbList('auditLog')).sort((a,b)=>(b.ts||0)-(a.ts||0));
+  exportCSV('audit-log.csv',
+    ['Date & Time','User','Role','Action','Details'],
+    all.map(e=>[e.ts ? new Date(e.ts).toLocaleString('en-PH') : '—', e.user, e.role, e.action, e.details])
+  );
+}
+
 window.addEventListener('DOMContentLoaded', () => {
-  // Public portal is the default landing page
   eid('public-page').style.display = 'block';
-  eid('splash').style.display = 'none';
+  eid('login-modal').style.display = 'none';
   eid('app').style.display = 'none';
 });
 </script>
