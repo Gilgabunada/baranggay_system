@@ -8,6 +8,7 @@
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2230;--border:#2a3444;--accent:#2ea87e;--accent2:#1a7a5a;--accent-glow:rgba(46,168,126,0.15);--red:#e05c5c;--yellow:#d4a84b;--blue:#4a9eff;--purple:#8b68db;--text:#e6edf3;--text2:#8b949e;--text3:#58687a;--radius:12px;--shadow:0 4px 24px rgba(0,0,0,0.4);}
@@ -437,7 +438,10 @@
           </div>
         </div>
         <div class="form-group"><label>Complete Address *</label><input type="text" id="pub-address" placeholder="House No., Street, Barangay"></div>
-        <div class="form-group"><label>Contact Number</label><input type="text" id="pub-contact" placeholder="09XX-XXX-XXXX"></div>
+        <div class="grid-2">
+          <div class="form-group"><label>Contact Number</label><input type="text" id="pub-contact" placeholder="09XX-XXX-XXXX"></div>
+          <div class="form-group"><label>Email Address <span style="font-size:.75rem;color:var(--text3)">(for barangay notifications)</span></label><input type="email" id="pub-email" placeholder="e.g. juan@gmail.com"></div>
+        </div>
 
         <!-- EXTRA: Register as Resident -->
         <div id="extra-register" class="extra-fields">
@@ -582,6 +586,7 @@
 </div>
 
 <script>
+const EMAILJS_KEY = { publicKey:'C9dVNuBDYs9WPkx9B', serviceId:'service_zdq7qtb', templateId:'template_donk0fw' };
 // ════════════════════════════════════════════════
 // FIREBASE — REALTIME DATABASE
 // ════════════════════════════════════════════════
@@ -594,9 +599,13 @@ firebase.initializeApp({
   messagingSenderId: "330630468460",
   appId: "1:330630468460:web:038cfc5a5c7e6be7a25949"
 });
+emailjs.init({ publicKey: 'C9dVNuBDYs9WPkx9B' });
 
 const auth = firebase.auth();
 const rtdb  = firebase.database();  // ← Realtime Database
+
+// Start real-time announcements listener immediately
+window.addEventListener('DOMContentLoaded', loadPublicAnnouncements);
 
 // ════════════════════════════════════════════════
 // REALTIME DB HELPERS
@@ -731,9 +740,9 @@ function photoInputHtml(currentPhoto, inputId='r-photo') {
         </div>
         <div>
           <input type="file" id="${inputId}" accept="image/*" style="display:none" onchange="previewPhoto('${inputId}')">
-          <button type="button" class="btn btn-ghost btn-sm" onclick="eid('${inputId}').click()">📷 Choose Photo</button>
-          ${currentPhoto ? `<button type="button" class="btn btn-ghost btn-sm" style="margin-left:6px;color:var(--red)" onclick="clearPhoto('${inputId}')">✕ Remove</button>` : ''}
-          <div style="font-size:.73rem;color:var(--text3);margin-top:5px">Will be compressed to 300×300px (~50KB)</div>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="eid('${inputId}').click()">Choose Photo</button>
+          <button type="button" id="${inputId}-remove" class="btn btn-ghost btn-sm" style="margin-left:6px;color:var(--red);display:${currentPhoto?'inline-flex':'none'}" onclick="clearPhoto('${inputId}')">Remove Photo</button>
+          <div style="font-size:.73rem;color:var(--text3);margin-top:5px">Compressed to 300×300px (~50KB)</div>
         </div>
       </div>
     </div>`;
@@ -745,24 +754,30 @@ async function previewPhoto(inputId) {
     const b64 = await compressImage(file);
     const prev = eid(`${inputId}-preview`);
     if (prev) prev.innerHTML = `<img src="${b64}" alt="photo">`;
-    // Store compressed data on the input element for saveResident to pick up
     eid(inputId)._compressed = b64;
+    const removeBtn = eid(`${inputId}-remove`);
+    if (removeBtn) removeBtn.style.display = 'inline-flex';
   } catch(e) { showToast(e.message, 'error'); }
 }
 function clearPhoto(inputId) {
   const prev = eid(`${inputId}-preview`);
   if (prev) prev.innerHTML = '👤';
   const inp = eid(inputId);
-  if (inp) { inp.value = ''; inp._compressed = null; }
+  if (inp) { inp.value = ''; inp._compressed = ''; }
+  const removeBtn = eid(`${inputId}-remove`);
+  if (removeBtn) removeBtn.style.display = 'none';
 }
 function getPhoto(inputId) {
   const inp = eid(inputId);
-  return inp?._compressed !== undefined ? inp._compressed : null;
+  if (!inp) return undefined; // undefined = input not found, no change
+  if (inp._compressed === undefined) return undefined; // not interacted with
+  return inp._compressed; // '' = cleared, 'data:...' = new photo
 }
 function avatarHtml(photo, name, size=34) {
-  if (photo) return `<img src="${photo}" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;border:1px solid var(--border)" alt="${name}">`;
-  const initials = (name||'?').split(' ').map(w=>w[0]||'').join('').slice(0,2).toUpperCase();
-  return `<div style="width:${size}px;height:${size}px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:${Math.round(size*.35)}px;font-weight:700;flex-shrink:0">${initials}</div>`;
+  const initials = (name||'?').split(' ').filter(Boolean).map(w=>w[0]||'').join('').slice(0,2).toUpperCase();
+  const fallback = `<div style="width:${size}px;height:${size}px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:${Math.round(size*.35)}px;font-weight:700;flex-shrink:0;color:#fff">${initials}</div>`;
+  if (!photo) return fallback;
+  return `<img loading="lazy" src="${photo}" width="${size}" height="${size}" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;border:1px solid var(--border);flex-shrink:0;display:block" alt="${initials}">`;
 }
 
 
@@ -918,6 +933,7 @@ function initApp() {
   eid('user-role-display').textContent = { captain:'Barangay Captain', secretary:'Barangay Secretary', health:'Healthcare Dept.' }[currentUser.role] || currentUser.role;
   buildNav();
   navigateTo('dashboard');
+  loadEmailJSConfig(); // load saved EmailJS credentials from Firebase
 }
 
 // ════════════════════════════════════════════════
@@ -947,8 +963,10 @@ const NAV = {
     { id:'summons', icon:'✉', label:'Summons' },
     { section:'Requests' },
     { id:'requests', icon:'↓', label:'Resident Requests', badge:true },
+    { section:'Communications' },
+    { id:'email-blast', icon:'@', label:'Email Blast' },
     { section:'Logs' },
-    { id:'audit-log', icon:'📋', label:'Audit Log' }
+    { id:'audit-log', icon:'▤', label:'Audit Log' }
   ],
   health: [
     { id:'dashboard', icon:'◈', label:'Dashboard' },
@@ -959,6 +977,8 @@ const NAV = {
     { id:'vaccines', icon:'◎', label:'Vaccination' },
     { id:'maternal', icon:'♡', label:'Maternal & Child' },
     { id:'health-edu', icon:'☰', label:'Health Education' },
+    { section:'Communications' },
+    { id:'email-blast', icon:'@', label:'Email Blast' },
     { id:'primary-care', icon:'⊕', label:'Primary Healthcare' }
   ]
 };
@@ -979,6 +999,7 @@ const PAGES = {
   'walkin-care': walkinCare, nutrition, financialAid,
   'health-edu': healthEdu, 'primary-care': primaryCare,
   announcements, 'summary-report': summaryReport,
+  'email-blast': emailBlast,
   'audit-log': auditLog
 };
 
@@ -1060,6 +1081,8 @@ async function residents(page=1) {
   const list = await dbList('residents');
   list.sort((a,b) => (a.lastName||'').localeCompare(b.lastName||''));
   _cache.residents = list;
+  // Pre-build resident dropdown options once — reused by all modals
+  _cache._resOpts = list.map(r=>`<option value="${r.id}">${r.lastName}, ${r.firstName}</option>`).join('');
   const search = (_cache._resSearch||'').toLowerCase();
   const filtered = search ? list.filter(r => `${r.firstName} ${r.lastName} ${r.address}`.toLowerCase().includes(search)) : list;
   const { items, page:pg, pages } = paginate(filtered, page);
@@ -1093,7 +1116,7 @@ async function residents(page=1) {
       <thead><tr><th>Name</th><th>Age</th><th>Gender</th><th>Civil Status</th><th>Household</th><th>Address</th><th>Actions</th></tr></thead>
       <tbody>
         ${items.length ? items.map(r=>`<tr>
-          <td><div style="display:flex;align-items:center;gap:9px">${avatarHtml(r.photo,`${r.firstName} ${r.lastName}`,34)}<strong>${r.lastName||''}, ${r.firstName||''}</strong></div></td>
+          <td><div style="display:flex;align-items:center;gap:9px;min-width:0">${avatarHtml(r.photo,`${r.firstName} ${r.lastName}`,32)}<strong style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${r.lastName||''}, ${r.firstName||''}</strong></div></td>
           <td>${calcAge(r.birthdate)}</td>
           <td><span class="badge ${r.gender==='Male'?'badge-blue':'badge-purple'}">${r.gender||'—'}</span></td>
           <td>${r.civilStatus||'—'}</td>
@@ -1199,7 +1222,10 @@ function residentForm(d={}) {
       <div class="form-group"><label>Household ID</label><input type="text" id="r-household" value="${d.householdId||''}" placeholder="e.g. HH001"></div>
     </div>
     <div class="form-group"><label>Complete Address *</label><input type="text" id="r-address" value="${d.address||''}"></div>
-    <div class="form-group"><label>Contact Number</label><input type="text" id="r-contact" value="${d.contact||''}"></div>
+    <div class="grid-2">
+      <div class="form-group"><label>Contact Number</label><input type="text" id="r-contact" value="${d.contact||''}"></div>
+      <div class="form-group"><label>Email Address <span style="font-size:.75rem;color:var(--text3)">(for notifications)</span></label><input type="email" id="r-email" value="${d.email||''}" placeholder="e.g. juan@gmail.com"></div>
+    </div>
     <div id="r-err" class="alert alert-error" style="display:none"></div>`;
 }
 
@@ -1221,9 +1247,14 @@ async function saveResident(id=null) {
   if (!fn||!ln||!bd||!gn||!addr) { setErr('r-err','Please fill all required fields.'); return; }
   const photo = getPhoto('r-photo');
   const existing = id ? ((_cache.residents||[]).find(r=>r.id===id)||{}).photo : null;
+  // photo === undefined: not touched → keep existing
+  // photo === '': deliberately cleared → save as null
+  // photo === 'data:...': new upload → save new
+  const finalPhoto = photo === undefined ? (existing||null) : (photo === '' ? null : photo);
   const data = { firstName:fn, lastName:ln, middleName:v('r-mname'), birthdate:bd, gender:gn,
     civilStatus:v('r-civil'), religion:v('r-religion'), householdId:v('r-household'), address:addr, contact:v('r-contact'),
-    photo: photo !== null ? photo : (existing||null)
+    email:v('r-email'),
+    photo: finalPhoto
   };
   try {
     if (id) { await dbUpdate(`residents/${id}`, data); await auditWrite('Edit Resident', `${fn} ${ln}`); }
@@ -1247,6 +1278,7 @@ async function viewResident(id) {
     <div class="info-row"><span class="info-label">Household ID</span><span class="info-value">${r.householdId||'—'}</span></div>
     <div class="info-row"><span class="info-label">Address</span><span class="info-value">${r.address||'—'}</span></div>
     <div class="info-row"><span class="info-label">Contact</span><span class="info-value">${r.contact||'—'}</span></div>
+    <div class="info-row"><span class="info-label">Email</span><span class="info-value">${r.email?`<a href="mailto:${r.email}" style="color:var(--accent)">${r.email}</a>`:'—'}</span></div>
     <div style="margin-top:13px;font-weight:600;margin-bottom:7px">Documents (${docs.length})</div>
     ${docs.length ? docs.map(d=>`<div class="info-row"><span class="info-label">${d.type||'—'}</span><span class="badge badge-green">${d.status||'—'}</span></div>`).join('') : '<div style="color:var(--text3);font-size:.83rem">No documents issued.</div>'}
   `, [{ label:'Close', cls:'btn-ghost', action:'closeModal()' }]);
@@ -1345,71 +1377,155 @@ async function households() {
 
 async function viewHousehold(hid) {
   const [resList, hhProfiles] = await Promise.all([dbList('residents'), dbList('householdProfiles')]);
-  const members = resList.filter(r => (r.householdId||'UNASSIGNED') === hid);
-  const profList = hhProfiles.filter(p => p.householdId === hid);
-  const prof = profList[0] || {};
-  const profId = prof.id || null;
-  const needOpts = ['Medical Assistance','Food Assistance','Financial Aid (Cash)','Educational Aid',
+  const members    = resList.filter(r => (r.householdId||'UNASSIGNED') === hid);
+  const unassigned = resList.filter(r => !r.householdId || r.householdId === 'UNASSIGNED');
+  const available  = resList.filter(r => (r.householdId||'') !== hid);
+  const profList   = hhProfiles.filter(p => p.householdId === hid);
+  const prof       = profList[0] || {};
+  const profId     = prof.id || null;
+  const needOpts   = ['Medical Assistance','Food Assistance','Financial Aid (Cash)','Educational Aid',
     'Livelihood Support','Burial Assistance','Calamity Relief','Senior Citizen Benefit','PWD Benefit','Solo Parent Benefit'];
   const currentNeeds = prof.needs || [];
 
-  openModal('Household: '+hid, `
-    <div style="margin-bottom:14px">
-      <div style="font-weight:600;font-size:.82rem;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Members (${members.length})</div>
-      <div style="max-height:160px;overflow-y:auto">
-        ${members.map(m=>`
-          <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
-            ${avatarHtml(m.photo, m.firstName+' '+m.lastName, 30)}
-            <div>
-              <div style="font-size:.85rem;font-weight:500">${m.firstName} ${m.middleName||''} ${m.lastName}</div>
-              <div style="font-size:.72rem;color:var(--text2)">${calcAge(m.birthdate)} yrs • ${m.gender||'—'} • ${m.civilStatus||'—'}</div>
+  // Sort available residents for the dropdown
+  const sortedAvail = [...available].sort((a,b) => (a.lastName||'').localeCompare(b.lastName||''));
+
+  eid('main-content').innerHTML = `
+    <div style="margin-bottom:20px">
+      <button class="btn btn-ghost btn-sm" onclick="households()" style="margin-bottom:12px">
+        ← Back to Households
+      </button>
+      <div class="page-header-row">
+        <div>
+          <div class="page-title">Household: ${hid}</div>
+          <div class="page-sub">${members.length} member(s) • ${members[0]?.address||'Address not set'}</div>
+        </div>
+        <button class="btn btn-primary" onclick="openAssignResident('${hid}')">+ Assign Resident</button>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1.4fr;gap:16px;align-items:start">
+
+      <!-- Members panel -->
+      <div class="card" style="padding:0">
+        <div style="padding:14px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+          <div style="font-weight:600;font-size:.88rem">Members <span style="color:var(--text3);font-weight:400">(${members.length})</span></div>
+        </div>
+        ${members.length ? members.map(m=>`
+          <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border)">
+            ${avatarHtml(m.photo, m.firstName+' '+m.lastName, 38)}
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:600;font-size:.88rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${m.firstName} ${m.middleName||''} ${m.lastName}</div>
+              <div style="font-size:.73rem;color:var(--text2)">${calcAge(m.birthdate)} yrs • ${m.gender||'—'} • ${m.civilStatus||'—'}</div>
+              ${m.contact ? `<div style="font-size:.72rem;color:var(--text3)">${m.contact}</div>` : ''}
             </div>
-          </div>`).join('')}
+            <button class="btn btn-ghost btn-sm" style="font-size:.72rem;color:var(--red);flex-shrink:0"
+              onclick="removeFromHousehold('${m.id}','${hid}','${m.firstName} ${m.lastName}')"
+              title="Remove from this household">Remove</button>
+          </div>`).join('') :
+          `<div style="padding:24px 16px;text-align:center;color:var(--text3);font-size:.84rem">
+            No members yet.<br>
+            <button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="openAssignResident('${hid}')">+ Assign Resident</button>
+          </div>`}
       </div>
-    </div>
-    <div style="border-top:1px solid var(--border);padding-top:14px">
-      <div style="font-weight:600;font-size:.82rem;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px">Financial Profile</div>
-      <div class="grid-2">
-        <div class="form-group"><label>Monthly Income (PHP)</label>
-          <input type="number" id="hh-income" value="${prof.monthlyIncome||''}" placeholder="e.g. 5000">
+
+      <!-- Profile panel -->
+      <div class="card">
+        <div style="font-weight:600;font-size:.88rem;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:14px">Financial Profile</div>
+        <div class="grid-2">
+          <div class="form-group"><label>Monthly Income (PHP)</label>
+            <input type="number" id="hh-income" value="${prof.monthlyIncome||''}" placeholder="e.g. 5000">
+          </div>
+          <div class="form-group"><label>Classification</label>
+            <select id="hh-class">
+              <option value="">— Select —</option>
+              ${['Indigent','Poor','Low Income','Middle Income','High Income'].map(c=>`<option value="${c}" ${prof.classification===c?'selected':''}>${c}</option>`).join('')}
+            </select>
+          </div>
         </div>
-        <div class="form-group"><label>Income Classification</label>
-          <select id="hh-class">
-            <option value="">— Select —</option>
-            ${['Indigent','Poor','Low Income','Middle Income','High Income'].map(c=>`<option value="${c}" ${prof.classification===c?'selected':''}>${c}</option>`).join('')}
-          </select>
+        <div class="grid-2">
+          <div class="form-group"><label>4Ps / NHTS Beneficiary?</label>
+            <select id="hh-4ps">
+              <option value="No" ${(prof.is4ps||'No')==='No'?'selected':''}>No</option>
+              <option value="Yes" ${prof.is4ps==='Yes'?'selected':''}>Yes</option>
+            </select>
+          </div>
+          <div class="form-group"><label>House Ownership</label>
+            <select id="hh-house">
+              ${['','Owned','Renting','Shared','Informal Settler'].map(h=>`<option value="${h}" ${prof.houseOwnership===h?'selected':''}>${h||'— Select —'}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Types of Need / Assistance Required</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:5px">
+            ${needOpts.map(n=>`
+              <label style="display:flex;align-items:center;gap:7px;font-size:.82rem;cursor:pointer;padding:6px 8px;border-radius:7px;background:var(--surface2)">
+                <input type="checkbox" id="hn-${n.replace(/[\s/()]/g,'-')}" ${currentNeeds.includes(n)?'checked':''}
+                  style="width:15px;height:15px;accent-color:var(--accent)">
+                ${n}
+              </label>`).join('')}
+          </div>
+        </div>
+        <div class="form-group"><label>Remarks / Notes</label>
+          <textarea id="hh-remarks" placeholder="Situation notes, follow-up actions…">${prof.remarks||''}</textarea>
+        </div>
+        <div id="hh-err" class="alert alert-error" style="display:none"></div>
+        <div style="margin-top:4px">
+          <button class="btn btn-primary" onclick="saveHouseholdProfile('${hid}','${profId||''}')">Save Profile</button>
         </div>
       </div>
-      <div class="grid-2">
-        <div class="form-group"><label>4Ps / NHTS Beneficiary?</label>
-          <select id="hh-4ps">
-            <option value="No" ${(prof.is4ps||'No')==='No'?'selected':''}>No</option>
-            <option value="Yes" ${prof.is4ps==='Yes'?'selected':''}>Yes</option>
-          </select>
-        </div>
-        <div class="form-group"><label>House Ownership</label>
-          <select id="hh-house">
-            ${['','Owned','Renting','Shared','Informal Settler'].map(h=>`<option value="${h}" ${prof.houseOwnership===h?'selected':''}>${h||'— Select —'}</option>`).join('')}
-          </select>
-        </div>
+
+    </div>`;
+}
+
+function openAssignResident(hid) {
+  dbList('residents').then(resList => {
+    const available = resList
+      .filter(r => (r.householdId||'') !== hid)
+      .sort((a,b) => (a.lastName||'').localeCompare(b.lastName||''));
+    openModal(`Assign Resident to Household ${hid}`, `
+      <div class="alert alert-info" style="margin-bottom:14px">
+        Select a resident to add to this household. Their Household ID will be updated automatically.
       </div>
-      <div class="form-group"><label>Types of Need / Assistance Required</label>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:5px">
-          ${needOpts.map(n=>`
-            <label style="display:flex;align-items:center;gap:7px;font-size:.83rem;cursor:pointer;padding:6px 8px;border-radius:7px;background:var(--surface2)">
-              <input type="checkbox" id="hn-${n.replace(/[\s/()]/g,'-')}" ${currentNeeds.includes(n)?'checked':''}
-                style="width:15px;height:15px;accent-color:var(--accent)">
-              ${n}
-            </label>`).join('')}
-        </div>
+      <div class="form-group">
+        <label>Select Resident *</label>
+        <select id="assign-res" style="width:100%">
+          <option value="">— Choose resident —</option>
+          ${available.map(r=>`
+            <option value="${r.id}">
+              ${r.lastName}, ${r.firstName} ${r.middleName||''} — Age ${calcAge(r.birthdate)} • ${r.gender||'—'}
+              ${r.householdId ? '(currently in HH: '+r.householdId+')' : '(unassigned)'}
+            </option>`).join('')}
+        </select>
       </div>
-      <div class="form-group"><label>Remarks / Notes</label>
-        <textarea id="hh-remarks" placeholder="Situation notes, follow-up actions…">${prof.remarks||''}</textarea>
-      </div>
-    </div>
-    <div id="hh-err" class="alert alert-error" style="display:none"></div>`,
-  [{ label:'Close', cls:'btn-ghost', action:'closeModal()' },
-   { label:'Save Profile', cls:'btn-primary', action:`saveHouseholdProfile('${hid}','${profId||''}')` }]);
+      ${!available.length ? '<div style="color:var(--text3);font-size:.84rem">All residents are already assigned to this household.</div>' : ''}
+      <div id="assign-err" class="alert alert-error" style="display:none"></div>`,
+    [{ label:'Cancel', cls:'btn-ghost', action:'closeModal()' },
+     { label:'Assign to Household', cls:'btn-primary', action:`confirmAssignResident('${hid}')` }]);
+  });
+}
+
+async function confirmAssignResident(hid) {
+  const resId = v('assign-res');
+  if (!resId) { setErr('assign-err', 'Please select a resident.'); return; }
+  try {
+    await dbUpdate(`residents/${resId}`, { householdId: hid });
+    await auditWrite('Assign to Household', `Resident ${resId} → Household ${hid}`);
+    closeModal();
+    showToast('Resident assigned to household.');
+    viewHousehold(hid);
+  } catch(e) { setErr('assign-err', e.message); }
+}
+
+async function removeFromHousehold(resId, hid, name) {
+  if (!confirm(`Remove ${name} from Household ${hid}? Their household ID will be cleared.`)) return;
+  try {
+    await dbUpdate(`residents/${resId}`, { householdId: '' });
+    await auditWrite('Remove from Household', `${name} removed from Household ${hid}`);
+    showToast(`${name} removed from household.`);
+    viewHousehold(hid);
+  } catch(e) { showToast('Error: '+e.message, 'error'); }
 }
 
 async function saveHouseholdProfile(hid, profId) {
@@ -1472,9 +1588,7 @@ async function docPage(node, icon, label) {
 }
 
 async function openIssueDoc(node, label) {
-  const res = await dbList('residents');
-  res.sort((a,b)=>(a.lastName||'').localeCompare(b.lastName||''));
-  const opts = res.map(r=>`<option value="${r.id}">${r.lastName}, ${r.firstName}</option>`).join('');
+  const opts = _cache._resOpts || '';
   openModal(`Issue Brgy. ${label}`, `
     <div class="form-group"><label>Resident *</label><select id="doc-res"><option value="">Select resident…</option>${opts}</select></div>
     <div class="form-group"><label>Purpose *</label><input type="text" id="doc-purpose" placeholder="e.g. Employment, Scholarship…"></div>
@@ -1606,9 +1720,7 @@ async function indigency() {
 }
 
 async function openIssueIndigency() {
-  const res = await dbList('residents');
-  res.sort((a,b)=>(a.lastName||'').localeCompare(b.lastName||''));
-  const opts = res.map(r=>`<option value="${r.id}">${r.lastName}, ${r.firstName}</option>`).join('');
+  const opts = _cache._resOpts || '';
   openModal('Issue Indigency Certificate', `
     <div class="form-group"><label>Resident *</label><select id="ind-res"><option value="">Select resident…</option>${opts}</select></div>
     <div class="form-group"><label>Purpose *</label>
@@ -1682,7 +1794,7 @@ async function business() {
 }
 
 async function openIssueBusiness() {
-  const res = await dbList('residents');
+  const res = (_cache.residents||[]).slice();
   res.sort((a,b)=>(a.lastName||'').localeCompare(b.lastName||''));
   const opts = res.map(r=>`<option value="${r.id}">${r.lastName}, ${r.firstName}</option>`).join('');
   openModal('Issue Business Clearance', `
@@ -2015,6 +2127,7 @@ async function acceptRegistration(id) {
       householdId: r.householdId||'',
       address:     r.address||'',
       contact:     r.contact||'',
+      email:       r.email||'',
       photo:       r.photo||null
     });
     await dbUpdate(`requests/${id}`, { status:'Done', remarks:'Accepted — added to residents registry.', processedBy:currentUser.name, processedAt:Date.now() });
@@ -2101,7 +2214,6 @@ async function healthRecords() {
   items.sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
   const resMap = {}; resList.forEach(r=>{ resMap[r.id]=r; });
   resList.sort((a,b)=>(a.lastName||'').localeCompare(b.lastName||''));
-  _cache._resOpts = resList.map(r=>`<option value="${r.id}">${r.lastName}, ${r.firstName}</option>`).join('');
 
   eid('main-content').innerHTML = `
     <div class="page-header-row">
@@ -2542,7 +2654,6 @@ async function vaccines() {
   items.sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
   const resMap = {}; resList.forEach(r=>{ resMap[r.id]=r; });
   resList.sort((a,b)=>(a.lastName||'').localeCompare(b.lastName||''));
-  _cache._resOpts = resList.map(r=>`<option value="${r.id}">${r.lastName}, ${r.firstName}</option>`).join('');
 
   eid('main-content').innerHTML = `
     <div class="page-header-row">
@@ -2718,7 +2829,6 @@ async function financialAid(page=1) {
   items.sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
   const resMap = {}; resList.forEach(r=>{ resMap[r.id]=r; });
   resList.sort((a,b)=>(a.lastName||'').localeCompare(b.lastName||''));
-  _cache._resOpts = resList.map(r=>`<option value="${r.id}">${r.lastName}, ${r.firstName}</option>`).join('');
   const { items:rows, page:pg, pages } = paginate(items, page);
 
   eid('main-content').innerHTML = `
@@ -3240,6 +3350,7 @@ async function submitPublicRequest() {
       firstName: fn, lastName: ln,
       birthday: bday, gender, address: addr,
       contact: v('pub-contact'),
+      email: v('pub-email'),
       reqType: reqtype,
       photo,
       status: 'Pending'
@@ -3266,7 +3377,7 @@ async function submitPublicRequest() {
 
     // Clear all fields
     ['pub-fname','pub-lname','pub-mname','pub-bday','pub-bday-dd','pub-bday-mm','pub-bday-yy',
-     'pub-gender','pub-address','pub-contact','pub-reqtype','pub-purpose','pub-civil',
+     'pub-gender','pub-address','pub-contact','pub-email','pub-reqtype','pub-purpose','pub-civil',
      'pub-religion','pub-household','pub-leave-reason','pub-new-address']
       .forEach(id=>{ const el=eid(id); if(el) el.value=''; });
     handleReqTypeChange(); // reset extra fields visibility
@@ -3337,8 +3448,267 @@ async function exportAuditLog() {
 }
 
 // ════════════════════════════════════════════════
-// ANNOUNCEMENTS (Captain — visible on public portal)
+// EMAIL BLAST
 // ════════════════════════════════════════════════
+
+function emailBlast() {
+  const configured = EMAILJS_KEY.publicKey && EMAILJS_KEY.serviceId && EMAILJS_KEY.templateId;
+  eid('main-content').innerHTML = `
+    <div class="page-header-row" style="margin-bottom:18px">
+      <div>
+        <div class="page-title">Email Blast</div>
+        <div class="page-sub">Send announcements or notifications to residents by group</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="toggleEmailSetup()" style="font-size:.78rem">
+        ${configured ? '&#9881; Connected' : '&#9881; Setup EmailJS'}
+      </button>
+    </div>
+
+    <!-- Hidden setup panel -->
+    <div id="emailjs-setup-panel" style="display:none;margin-bottom:18px">
+      <div class="card">
+        <div style="font-weight:600;font-size:.85rem;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px">EmailJS Setup</div>
+        <div class="grid-3">
+          <div class="form-group"><label>Public Key</label>
+            <input type="text" id="ejs-pubkey" value="${EMAILJS_KEY.publicKey}" placeholder="e.g. user_xxxxxxxx">
+          </div>
+          <div class="form-group"><label>Service ID</label>
+            <input type="text" id="ejs-service" value="${EMAILJS_KEY.serviceId}" placeholder="e.g. service_xxxxxxx">
+          </div>
+          <div class="form-group"><label>Template ID</label>
+            <input type="text" id="ejs-template" value="${EMAILJS_KEY.templateId}" placeholder="e.g. template_xxxxxxx">
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap">
+          <button class="btn btn-primary btn-sm" onclick="saveEmailJSConfig()">Save Credentials</button>
+          <span style="color:var(--text3);font-size:.78rem">test:</span>
+          <input type="email" id="ejs-test-email" placeholder="your@email.com" style="padding:7px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.83rem;width:200px">
+          <button id="ejs-test-btn" class="btn btn-ghost btn-sm" onclick="testEmailJS()">Send Test Email</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Compose Card -->\n    <div class="card">
+      <div style="font-weight:600;font-size:.85rem;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:14px">Compose & Send</div>
+
+      <div class="form-group"><label>Target Group *</label>
+        <select id="blast-group" onchange="previewBlastRecipients()">
+          <option value="">— Select group —</option>
+          <optgroup label="All">
+            <option value="all">All Residents (with email)</option>
+          </optgroup>
+          <optgroup label="By Age">
+            <option value="seniors">Senior Citizens (60+)</option>
+            <option value="youth">Youth (15–30 yrs)</option>
+            <option value="under5">Children Under 5 yrs</option>
+          </optgroup>
+          <optgroup label="By Welfare">
+            <option value="4ps">4Ps / NHTS Beneficiaries</option>
+            <option value="indigent">Indigent / Poor Households</option>
+          </optgroup>
+          <optgroup label="By Health">
+            <option value="sam">SAM — Severe Acute Malnutrition</option>
+            <option value="mam">MAM — Moderate Acute Malnutrition</option>
+            <option value="pregnant">Maternal / Prenatal Records</option>
+            <option value="referred">Hospital-Referred Patients</option>
+          </optgroup>
+        </select>
+      </div>
+
+      <div id="blast-preview" style="display:none;margin-bottom:14px">
+        <div style="font-size:.8rem;color:var(--text2);margin-bottom:6px">Recipients preview:</div>
+        <div id="blast-preview-list" style="background:var(--surface2);border-radius:8px;padding:10px;font-size:.8rem;max-height:100px;overflow-y:auto;line-height:1.8"></div>
+        <div id="blast-count" style="font-size:.78rem;color:var(--text3);margin-top:5px"></div>
+      </div>
+
+      <div class="form-group"><label>Subject *</label>
+        <input type="text" id="blast-subject" placeholder="e.g. Barangay Relief Operation — Please Read">
+      </div>
+      <div class="form-group"><label>Message *</label>
+        <textarea id="blast-message" rows="6" placeholder="Dear [Name],&#10;&#10;We would like to inform you that...&#10;&#10;— Barangay Office"></textarea>
+      </div>
+      <div id="blast-err" class="alert alert-error" style="display:none"></div>
+      <div id="blast-progress" style="display:none;margin-bottom:10px">
+        <div style="font-size:.83rem;color:var(--text2);margin-bottom:5px" id="blast-progress-text">Sending…</div>
+        <div style="background:var(--surface2);border-radius:20px;height:8px;overflow:hidden">
+          <div id="blast-progress-bar" style="height:100%;background:var(--accent);width:0%;transition:width .3s"></div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <button class="btn btn-ghost" onclick="previewBlastRecipients()">Preview Recipients</button>
+        <button class="btn btn-primary" id="blast-send-btn" onclick="sendEmailBlast()">Send Emails</button>
+      </div>
+    </div>`;
+}
+
+function toggleEmailSetup() {
+  const panel = eid('emailjs-setup-panel');
+  if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+async function saveEmailJSConfig() {
+  const pk = v('ejs-pubkey').trim();
+  const si = v('ejs-service').trim();
+  const ti = v('ejs-template').trim();
+  if (!pk||!si||!ti) { showToast('Fill all three EmailJS fields.','error'); return; }
+  EMAILJS_KEY.publicKey  = pk;
+  EMAILJS_KEY.serviceId  = si;
+  EMAILJS_KEY.templateId = ti;
+  emailjs.init({ publicKey: pk });
+  // Persist to Firebase so it survives page refresh
+  try {
+    await dbSet('settings/emailjs', { publicKey:pk, serviceId:si, templateId:ti });
+    showToast('EmailJS credentials saved.'); emailBlast();
+  } catch(e) { showToast('Saved in memory only — DB error: '+e.message, 'error'); emailBlast(); }
+}
+
+async function loadEmailJSConfig() {
+  try {
+    const cfg = await dbGet('settings/emailjs');
+    if (cfg && cfg.publicKey) {
+      EMAILJS_KEY.publicKey  = cfg.publicKey;
+      EMAILJS_KEY.serviceId  = cfg.serviceId;
+      EMAILJS_KEY.templateId = cfg.templateId;
+      emailjs.init({ publicKey: cfg.publicKey });
+    }
+  } catch(e) { /* silent */ }
+}
+
+async function testEmailJS() {
+  const testEmail = v('ejs-test-email')?.trim();
+  if (!testEmail) { showToast('Enter a test email address first.', 'error'); return; }
+  if (!EMAILJS_KEY.publicKey) { showToast('Save your EmailJS credentials first.', 'error'); return; }
+  const btn = eid('ejs-test-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    const senderName = { captain:'Barangay Captain', secretary:'Barangay Secretary', health:'Healthcare Department' }[currentUser?.role] || 'Barangay Official';
+    await emailjs.send(EMAILJS_KEY.serviceId, EMAILJS_KEY.templateId, {
+      to_email: testEmail,
+      to_name:  'Test Recipient',
+      subject:  'BIMS Test Email',
+      message:  'This is a test email from your Barangay Information Management System. If you received this, EmailJS is working correctly!',
+      from_name: senderName
+    });
+    showToast('Test email sent! Check your inbox.', 'success');
+  } catch(e) {
+    showToast('Failed: ' + (e.text || e.message || JSON.stringify(e)), 'error');
+    console.error('EmailJS test error:', e);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Send Test Email'; }
+  }
+}
+
+async function getBlastRecipients(group) {
+  const [resList, hhProfiles, nutritionRecs, maternalRecs, healthRecs, walkinRecs] = await Promise.all([
+    dbList('residents'), dbList('householdProfiles'),
+    dbList('nutritionRecords'), dbList('maternal'),
+    dbList('healthRecords'), dbList('walkinRecords')
+  ]);
+
+  let targets = [];
+
+  if (group === 'all') {
+    targets = resList.filter(r => r.email);
+  } else if (group === 'seniors') {
+    targets = resList.filter(r => r.email && calcAge(r.birthdate) >= 60);
+  } else if (group === 'youth') {
+    targets = resList.filter(r => { const a=calcAge(r.birthdate); return r.email && a>=15 && a<=30; });
+  } else if (group === 'under5') {
+    targets = resList.filter(r => r.email && calcAge(r.birthdate) <= 5);
+  } else if (group === '4ps') {
+    const hhIds = new Set(hhProfiles.filter(p=>p.is4ps==='Yes').map(p=>p.householdId));
+    targets = resList.filter(r => r.email && hhIds.has(r.householdId));
+  } else if (group === 'indigent') {
+    const hhIds = new Set(hhProfiles.filter(p=>p.classification==='Indigent'||p.classification==='Poor').map(p=>p.householdId));
+    targets = resList.filter(r => r.email && hhIds.has(r.householdId));
+  } else if (group === 'sam') {
+    const resIds = new Set(nutritionRecs.filter(n=>n.status==='SAM').map(n=>n.residentId));
+    targets = resList.filter(r => r.email && resIds.has(r.id));
+  } else if (group === 'mam') {
+    const resIds = new Set(nutritionRecs.filter(n=>n.status==='MAM').map(n=>n.residentId));
+    targets = resList.filter(r => r.email && resIds.has(r.id));
+  } else if (group === 'pregnant') {
+    const resIds = new Set(maternalRecs.filter(m=>m.type&&m.type.toLowerCase().includes('prenatal')).map(m=>m.residentId));
+    targets = resList.filter(r => r.email && resIds.has(r.id));
+  } else if (group === 'referred') {
+    const resIds = new Set([...healthRecs,...walkinRecs].filter(h=>h.hospitalized==='Yes').map(h=>h.residentId).filter(Boolean));
+    targets = resList.filter(r => r.email && resIds.has(r.id));
+  }
+
+  return targets;
+}
+
+async function previewBlastRecipients() {
+  const group = v('blast-group');
+  if (!group) return;
+  const targets = await getBlastRecipients(group);
+  const preview = eid('blast-preview');
+  const list    = eid('blast-preview-list');
+  const count   = eid('blast-count');
+  if (!preview||!list||!count) return;
+  if (!targets.length) {
+    list.innerHTML = '<span style="color:var(--text3)">No residents with email found in this group.</span>';
+    count.textContent = '0 recipients';
+  } else {
+    list.innerHTML = targets.map(r=>`<span style="margin-right:12px">${r.firstName} ${r.lastName} &lt;${r.email}&gt;</span>`).join('');
+    count.textContent = `${targets.length} recipient(s) — only residents with a saved email address are included`;
+  }
+  preview.style.display = 'block';
+}
+
+async function sendEmailBlast() {
+  if (!EMAILJS_KEY.publicKey) { setErr('blast-err','Configure EmailJS credentials first.'); return; }
+  const group   = v('blast-group');
+  const subject = v('blast-subject');
+  const message = v('blast-message');
+  if (!group||!subject||!message) { setErr('blast-err','Select a group and fill subject and message.'); return; }
+
+  const targets = await getBlastRecipients(group);
+  if (!targets.length) { setErr('blast-err','No recipients found with email addresses in this group.'); return; }
+
+  if (!confirm(`Send email to ${targets.length} recipient(s)? This cannot be undone.`)) return;
+
+  const btn      = eid('blast-send-btn');
+  const errEl    = eid('blast-err');
+  const progress = eid('blast-progress');
+  const progText = eid('blast-progress-text');
+  const progBar  = eid('blast-progress-bar');
+  btn.disabled   = true;
+  errEl.style.display = 'none';
+  progress.style.display = 'block';
+
+  let sent = 0, failed = 0;
+  for (let i = 0; i < targets.length; i++) {
+    const r = targets[i];
+    progText.textContent = `Sending ${i+1} of ${targets.length}… (${r.firstName} ${r.lastName})`;
+    progBar.style.width  = `${Math.round((i/targets.length)*100)}%`;
+    const senderName = { captain:'Barangay Captain', secretary:'Barangay Secretary', health:'Healthcare Department' }[currentUser.role] || currentUser.name || 'Barangay Official';
+    try {
+      await emailjs.send(EMAILJS_KEY.serviceId, EMAILJS_KEY.templateId, {
+        to_email: r.email,
+        to_name:  `${r.firstName} ${r.lastName}`,
+        subject,
+        message,
+        from_name: senderName
+      });
+      sent++;
+    } catch(e) {
+      failed++;
+      console.warn(`Failed to send to ${r.email}:`, e);
+    }
+    // Small delay to avoid rate limiting
+    await new Promise(res => setTimeout(res, 300));
+  }
+
+  progBar.style.width = '100%';
+  progText.textContent = `Done. ${sent} sent, ${failed} failed.`;
+  btn.disabled = false;
+
+  await auditWrite('Email Blast', `Group: ${group} — ${sent} sent, ${failed} failed — Subject: ${subject}`);
+  showToast(`Email blast complete: ${sent} sent${failed?', '+failed+' failed':''}.`, failed?'error':'success');
+}
+
+
 async function announcements() {
   const items = (await dbList('announcements')).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
   eid('main-content').innerHTML = `
@@ -3459,29 +3829,39 @@ async function deleteAnnouncement(id) {
 }
 
 // Load active announcements on public portal
-async function loadPublicAnnouncements() {
-  try {
-    const all = await dbList('announcements');
-    const active = all
-      .filter(a => a.status === 'Active')
-      .sort((a,b) => (b.pinned?1:0) - (a.pinned?1:0) || (b.createdAt||0) - (a.createdAt||0));
-    if (!active.length) return;
-    const wrap = eid('public-announcements-wrap');
-    const list = eid('public-announcements-list');
-    if (!wrap || !list) return;
-    const catColor = { 'Emergency':'badge-red','Health':'badge-green','Event':'badge-blue','Program':'badge-blue','Notice':'badge-yellow','General':'badge-gray' };
-    list.innerHTML = active.map(a=>`
-      <div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--radius);padding:14px 16px;margin-bottom:10px">
-        <div style="display:flex;align-items:center;gap:7px;margin-bottom:5px;flex-wrap:wrap">
-          ${a.pinned ? '<span class="badge badge-yellow" style="font-size:.68rem">Pinned</span>' : ''}
-          ${a.category ? `<span class="badge ${catColor[a.category]||'badge-gray'}" style="font-size:.68rem">${a.category}</span>` : ''}
-          <span style="font-size:.72rem;color:var(--text3)">${a.createdAt ? new Date(a.createdAt).toLocaleDateString('en-PH',{year:'numeric',month:'long',day:'numeric'}) : ''}</span>
-        </div>
-        <div style="font-weight:700;font-size:.95rem;margin-bottom:5px">${a.title}</div>
-        <div style="font-size:.83rem;color:var(--text2);line-height:1.65;white-space:pre-wrap">${a.body}</div>
-      </div>`).join('');
-    wrap.style.display = 'block';
-  } catch(e) { /* silent fail on public portal */ }
+function loadPublicAnnouncements() {
+  const catColor = { 'Emergency':'badge-red','Health':'badge-green','Event':'badge-blue','Program':'badge-blue','Notice':'badge-yellow','General':'badge-gray' };
+
+  rtdb.ref('announcements').on('value', snapshot => {
+    try {
+      const wrap = eid('public-announcements-wrap');
+      const list = eid('public-announcements-list');
+      if (!wrap || !list) return;
+
+      const val = snapshot.val();
+      if (!val) { wrap.style.display = 'none'; return; }
+
+      const active = Object.entries(val)
+        .map(([id, a]) => ({ id, ...a }))
+        .filter(a => a.status === 'Active')
+        .sort((a,b) => (b.pinned?1:0) - (a.pinned?1:0) || (b.createdAt||0) - (a.createdAt||0));
+
+      if (!active.length) { wrap.style.display = 'none'; return; }
+
+      list.innerHTML = active.map(a => `
+        <div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--radius);padding:14px 16px;margin-bottom:10px">
+          <div style="display:flex;align-items:center;gap:7px;margin-bottom:5px;flex-wrap:wrap">
+            ${a.pinned ? '<span class="badge badge-yellow" style="font-size:.68rem">Pinned</span>' : ''}
+            ${a.category ? `<span class="badge ${catColor[a.category]||'badge-gray'}" style="font-size:.68rem">${a.category}</span>` : ''}
+            <span style="font-size:.72rem;color:var(--text3)">${a.createdAt ? new Date(a.createdAt).toLocaleDateString('en-PH',{year:'numeric',month:'long',day:'numeric'}) : ''}</span>
+          </div>
+          <div style="font-weight:700;font-size:.95rem;margin-bottom:5px">${a.title}</div>
+          <div style="font-size:.83rem;color:var(--text2);line-height:1.65;white-space:pre-wrap">${a.body}</div>
+        </div>`).join('');
+
+      wrap.style.display = 'block';
+    } catch(e) { console.warn('Announcements error:', e); }
+  }, error => { console.warn('Announcements listener error:', error); });
 }
 
 // ════════════════════════════════════════════════
