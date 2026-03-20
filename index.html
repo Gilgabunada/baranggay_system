@@ -191,7 +191,6 @@ document.addEventListener('DOMContentLoaded', () => {
 </head>
 <body>
 <div id="print-area"></div>
-<div id="offline-banner" class="offline-banner">⚠️ You are offline. Changes may not be saved until you reconnect.</div>
 <div id="session-warn" class="session-warn">⏱ Session expires in <span id="session-countdown">5:00</span> due to inactivity. <button onclick="resetSessionTimer()" style="margin-left:10px;padding:3px 10px;border:1px solid #1a1a1a;border-radius:4px;cursor:pointer;font-weight:700;background:transparent">Keep me signed in</button></div>
 <div id="toast" class="toast"></div>
 
@@ -662,7 +661,7 @@ const BRGY = {
   contactNo:   '09199452798',                        // barangay contact number
   email:       'Barangaybabag@gmail.com',                        // barangay email
 };
-//  ════════════════════════════════════════════════
+// ════════════════════════════════════════════════
 // ════════════════════════════════════════════════
 // FIREBASE — REALTIME DATABASE
 // ════════════════════════════════════════════════
@@ -726,8 +725,6 @@ function showToast(msg, type='success') {
 }
 
 // ── OFFLINE DETECTION ──
-window.addEventListener('online',  ()=>{ const b=eid('offline-banner'); if(b) b.style.display='none'; });
-window.addEventListener('offline', ()=>{ const b=eid('offline-banner'); if(b) b.style.display='block'; });
 
 // ── SESSION TIMEOUT (30 min inactivity) ──
 const SESSION_MS = 30 * 60 * 1000;
